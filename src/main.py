@@ -70,15 +70,13 @@ def generate_logen_shipping_file(
         from_iso = os.environ.get("NAVER_ORDER_FROM", "").strip() or None
     if to_iso is None:
         to_iso = os.environ.get("NAVER_ORDER_TO", "").strip() or None
-    # 배송상태: NAVER_INCLUDE_ALL_SHIPPING=1 이면 전체, 아니면 배송준비중(READY)만
-    shipping_status = "READY"
-    if os.environ.get("NAVER_INCLUDE_ALL_SHIPPING", "").strip().upper() in ("1", "TRUE", "YES"):
-        shipping_status = None
-
-    # Call fetch_orders to get order data
+    # 결제완료만 된 주문은 제외; 결제완료(PAYED) + 발주확인(placeOrderStatus=OK)인 주문만 엑셀에 반영
+    # API는 shipping_status 없이 PAYED만 요청하고, 응답에서 placeOrderStatus=OK만 필터링
     orders = client.fetch_orders(
         last_hours=last_hours,
-        shipping_status=shipping_status,
+        payment_status="PAYED",
+        shipping_status=None,
+        place_order_status="OK",
         from_iso=from_iso,
         to_iso=to_iso,
     )

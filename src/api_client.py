@@ -41,6 +41,7 @@ class NaverCommerceClient:
         self,
         payment_status: str = "PAYED",
         shipping_status: Optional[str] = "READY",
+        place_order_status: Optional[str] = None,
         last_hours: int = 24,
         from_iso: Optional[str] = None,
         to_iso: Optional[str] = None,
@@ -49,14 +50,18 @@ class NaverCommerceClient:
         """
         Fetch orders from Naver Commerce API with specified filters.
         
-        This method retrieves orders filtered by payment status and shipping status.
+        This method retrieves orders filtered by payment status and optionally
+        shipping status or place order status (발주확인). placeOrderStatus is
+        response-only in API; when place_order_status is set, shipping_status
+        is not sent and results are filtered by placeOrderStatus in response.
         It implements retry logic with exponential backoff for transient failures
         (5xx errors) and raises NaverAPIError for authentication failures (401)
         and other errors.
         
         Args:
             payment_status: Payment status filter (default: "PAYED")
-            shipping_status: Shipping status filter (default: "READY"). None 또는 "" 이면 미전송(전체 배송상태 조회, 테스트용)
+            shipping_status: Shipping status filter (default: "READY"). None 또는 "" 이면 미전송.
+            place_order_status: 발주 상태 필터 (예: "OK"=발주확인). 지정 시 shipping_status 미사용, 응답에서 placeOrderStatus로 필터링.
             last_hours: 조회 기간(시간). from_iso/to_iso 미지정 시 사용. API 제한으로 최대 23.
             from_iso: 테스트용. 조회 시작 시각 ISO-8601 (지정 시 last_hours 무시)
             to_iso: 테스트용. 조회 종료 시각 ISO-8601 (from_iso와 함께 사용, 최대 24시간 차이)
@@ -97,6 +102,7 @@ class NaverCommerceClient:
                         partial = self.fetch_orders(
                             payment_status=payment_status,
                             shipping_status=shipping_status,
+                            place_order_status=place_order_status,
                             last_hours=last_hours,
                             from_iso=sub_from,
                             to_iso=sub_to,
@@ -129,7 +135,8 @@ class NaverCommerceClient:
             "to": to_str,
             "paymentStatus": payment_status,
         }
-        if shipping_status:
+        # place_order_status 사용 시 API는 필터 미지원이므로 shippingStatus 미전송 후 응답에서 필터링
+        if shipping_status and not place_order_status:
             params["shippingStatus"] = shipping_status
         
         last_error = None
@@ -207,6 +214,27 @@ class NaverCommerceClient:
                     product_order = block.get("productOrder") or {}
 
                     if product_order:
+                        # 결제완료(PAYED) 필수; 배송상태는 shipping_status 또는 place_order_status(발주확인)로 필터
+                        payment_status_val = (
+                            order_block.get("paymentStatus")
+                            or product_order.get("paymentStatus")
+                            or ""
+                        ).strip().upper()
+                        if payment_status_val and payment_status_val != "PAYED":
+                            continue
+                        if place_order_status:
+                            # 발주확인(OK)만 포함: placeOrderStatus로 필터 (API 요청 파라미터 미지원이라 응답에서 필터)
+                            place_ok = (
+                                (product_order.get("placeOrderStatus") or order_block.get("placeOrderStatus") or "")
+                            ).strip().upper()
+                            if place_ok != place_order_status.upper():
+                                continue
+                        else:
+                            shipping_status_val = (
+                                (product_order.get("productOrderStatus") or product_order.get("shippingStatus") or order_block.get("shippingStatus") or "")
+                            ).strip().upper()
+                            if shipping_status_val and shipping_status_val != "READY":
+                                continue
                         # 실제 API 응답: order + productOrder + shippingAddress
                         shipping = product_order.get("shippingAddress") or {}
                         order_id = order_block.get("orderId") or product_order.get("productOrderId") or ""
@@ -226,10 +254,21 @@ class NaverCommerceClient:
                             "deliveryMemo": delivery_memo,
                         })
                     else:
-                        # 이미 flat 형태(테스트/레거시): orderId -> order_id, 나머지 키 그대로
+                        # 이미 flat 형태(테스트/레거시): 결제완료 + (배송준비중 또는 발주확인)만 포함
                         flat = dict(item)
                         if "orderId" in flat and "order_id" not in flat:
                             flat["order_id"] = flat.get("orderId", "")
+                        pay = (flat.get("paymentStatus") or "").upper()
+                        if pay and pay != "PAYED":
+                            continue
+                        if place_order_status:
+                            place_ok = (flat.get("placeOrderStatus") or "").upper()
+                            if place_ok != place_order_status.upper():
+                                continue
+                        else:
+                            ship = (flat.get("shippingStatus") or flat.get("productOrderStatus") or "").upper()
+                            if ship and ship != "READY":
+                                continue
                         orders.append(flat)
                 return orders
             
